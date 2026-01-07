@@ -69,6 +69,16 @@ static const uint8_t LAST_PWM = V24;
 static const uint8_t LAST_EVENT = V25;
 }  // namespace VPin
 
+// Macros for BLYNK_WRITE token pasting
+#define VPIN_SIM_TEMP V1
+#define VPIN_BIOMASS V2
+#define VPIN_MANUAL_FEED V3
+#define VPIN_MODE_SELECT V4
+#define VPIN_PWM_PERCENT V5
+#define VPIN_GPS_100 V6
+#define VPIN_SIM_EVENT V7
+#define VPIN_TEST_IN V8
+
 // Globals
 OneWire oneWire(Pins::DS18B20);
 DallasTemperature dallas(&oneWire);
@@ -438,7 +448,7 @@ BLYNK_WRITE_DEFAULT() {
   Serial.printf("Blynk V%d raw=%s\n", pin, val.c_str());
 }
 
-BLYNK_WRITE(VPin::SIM_TEMP) {
+BLYNK_WRITE(VPIN_SIM_TEMP) {
   inputs.simTempC = param.asDouble();
   inputs.simTempEnabled = true;
   inputs.lastSimTempUpdateMs = millis();
@@ -446,44 +456,44 @@ BLYNK_WRITE(VPin::SIM_TEMP) {
   Serial.printf("Blynk V1 Sim_Temp=%.2fC (simulation ON)\n", inputs.simTempC);
 }
 
-BLYNK_WRITE(VPin::BIOMASS) {
+BLYNK_WRITE(VPIN_BIOMASS) {
   inputs.biomassG = param.asDouble();
   Serial.printf("Blynk V2 Biomass=%.2fg\n", inputs.biomassG);
 }
 
-BLYNK_WRITE(VPin::MANUAL_FEED) {
+BLYNK_WRITE(VPIN_MANUAL_FEED) {
   if (param.asInt() == 1) {
     requests.manualFeed = true;
   }
   Serial.printf("Blynk V3 Manual_Feed=%d\n", param.asInt());
 }
 
-BLYNK_WRITE(VPin::MODE_SELECT) {
+BLYNK_WRITE(VPIN_MODE_SELECT) {
   inputs.modeSelect = param.asInt();
   Serial.printf("Blynk V4 Mode_Select=%d\n", inputs.modeSelect);
 }
 
-BLYNK_WRITE(VPin::PWM_PERCENT) {
+BLYNK_WRITE(VPIN_PWM_PERCENT) {
   inputs.pwmPercent = param.asInt();
   if (inputs.pwmPercent < 0) inputs.pwmPercent = 0;
   if (inputs.pwmPercent > 100) inputs.pwmPercent = 100;
   Serial.printf("Blynk V5 PWM_Percent=%d\n", inputs.pwmPercent);
 }
 
-BLYNK_WRITE(VPin::GPS_100) {
+BLYNK_WRITE(VPIN_GPS_100) {
   inputs.gramsPerSec100 = param.asInt();
   if (inputs.gramsPerSec100 < 1) inputs.gramsPerSec100 = 1;
   Serial.printf("Blynk V6 GramPerSec_100=%d\n", inputs.gramsPerSec100);
 }
 
-BLYNK_WRITE(VPin::SIM_EVENT) {
+BLYNK_WRITE(VPIN_SIM_EVENT) {
   if (param.asInt() == 1) {
     requests.simEvent = true;
   }
   Serial.printf("Blynk V7 Sim_Event=%d\n", param.asInt());
 }
 
-BLYNK_WRITE(VPin::TEST_IN) {
+BLYNK_WRITE(VPIN_TEST_IN) {
   float v = param.asFloat();
   inputs.simDistanceCm = v;
   inputs.simDistanceEnabled = true;

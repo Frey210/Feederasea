@@ -33,36 +33,87 @@ Feederasea/
 
 ---
 
-## 3) Hardware dan Pin Mapping
+## 3) Daftar Komponen Lengkap
 
-### Sensor dan Aktuator
-- DS18B20: GPIO4
-- HC-SR04: TRIG GPIO12, ECHO GPIO14 (ECHO harus level-shift ke 3.3V)
-- Servo MG996R: GPIO26
-- BTS7960:
-  - LPWM = GPIO32
-  - RPWM = GPIO33
-  - L_EN = GPIO27
-  - R_EN = GPIO25
-
-Catatan BTS7960:
-- Paper menyebut L298N (IN1/IN2/ENA). Pada firmware ini driver tetap BTS7960.
-- Gunakan GPIO27 dan GPIO25 untuk L_EN dan R_EN.
-- Gunakan GPIO32 dan GPIO33 untuk LPWM dan RPWM.
-
-### LCD I2C
-- SDA = GPIO21
-- SCL = GPIO22
-- Address default = 0x27
-
-### LED dan Tombol
-- Status LED = GPIO2
-- LOW_FEED LED = GPIO15
-- Manual Button = GPIO34 (input-only, aktif LOW, butuh pull-up eksternal)
+- ESP32 DevKit (ESP32-WROOM-32)
+- Sensor suhu DS18B20 + resistor 4.7k pull-up
+- Sensor jarak HC-SR04 + level shifter (atau divider) untuk ECHO 3.3V
+- Driver motor BTS7960
+- Motor DC + piringan pelontar pakan
+- Servo MG996R
+- LCD I2C 16x2 (alamat umum 0x27)
+- Push button manual + resistor pull-up eksternal
+- LED status + resistor, LED low feed + resistor
+- Power supply 12V (motor) dan 5V (ESP32, servo, sensor, LCD)
+- Step-down 12V ke 5V (contoh LM2596)
+- Kabel, terminal, dan konektor
 
 ---
 
-## 4) Konfigurasi Blynk
+## 4) Wiring Diagram (Text)
+
+### Power
+- 12V: masuk ke BTS7960 untuk motor
+- 5V: ESP32, servo, DS18B20, HC-SR04, LCD
+- Semua GND disatukan (common ground)
+
+### DS18B20
+- VCC -> 3.3V
+- GND -> GND
+- DATA -> GPIO4 + resistor 4.7k ke 3.3V
+
+### HC-SR04
+- VCC -> 5V
+- GND -> GND
+- TRIG -> GPIO12
+- ECHO -> level-shift -> GPIO14
+
+### BTS7960
+- VCC -> 5V (logic)
+- GND -> GND
+- L_EN -> GPIO27
+- R_EN -> GPIO25
+- LPWM -> GPIO32
+- RPWM -> GPIO33
+- MOTOR+/- -> output driver ke motor DC
+
+### Servo MG996R
+- VCC -> 5V (supply terpisah lebih baik)
+- GND -> GND
+- SIG -> GPIO26
+
+### LCD I2C
+- VCC -> 5V
+- GND -> GND
+- SDA -> GPIO21
+- SCL -> GPIO22
+
+### LED dan Tombol
+- LED Status: GPIO2 -> resistor -> GND
+- LED Low Feed: GPIO15 -> resistor -> GND
+- Tombol manual: satu kaki ke GND, satu kaki ke GPIO34 + pull-up eksternal ke 3.3V
+
+---
+
+## 5) List GPIO
+
+- GPIO2  : LED status
+- GPIO4  : DS18B20 data
+- GPIO12 : HC-SR04 TRIG
+- GPIO14 : HC-SR04 ECHO (level-shift)
+- GPIO15 : LED low feed
+- GPIO21 : I2C SDA (LCD)
+- GPIO22 : I2C SCL (LCD)
+- GPIO25 : BTS7960 R_EN
+- GPIO26 : Servo MG996R signal
+- GPIO27 : BTS7960 L_EN
+- GPIO32 : BTS7960 LPWM
+- GPIO33 : BTS7960 RPWM
+- GPIO34 : Manual button (input-only)
+
+---
+
+## 6) Konfigurasi Blynk
 
 Template: `Feederasea`
 Auth Token: lihat `include/secrets.h`.
@@ -89,7 +140,7 @@ Pastikan datastream V1..V8 writeable (Input atau Input/Output) agar ESP32 meneri
 
 ---
 
-## 5) Cara Kerja Utama
+## 7) Cara Kerja Utama
 
 Firmware berjalan dengan loop non-blocking menggunakan `Blynk.run()` dan `BlynkTimer`.
 
@@ -111,7 +162,7 @@ Parameter dapat dikalibrasi di `src/main.cpp`:
 
 ---
 
-## 6) Mode Operasi (A/B/C)
+## 8) Mode Operasi (A/B/C)
 
 ### Mode A (0)
 - Komando pakan tetap: 50 g per event.
@@ -129,7 +180,7 @@ Parameter dapat dikalibrasi di `src/main.cpp`:
 
 ---
 
-## 7) State Machine Feeding
+## 9) State Machine Feeding
 
 Urutan state:
 - `IDLE`
@@ -154,7 +205,7 @@ Clamp runtime max 12s
 
 ---
 
-## 8) Tutorial Penggunaan
+## 10) Tutorial Penggunaan
 
 ### Langkah 1: Wiring
 - Sambungkan komponen sesuai pin mapping di atas.
@@ -190,7 +241,7 @@ platformio device monitor -b 115200
 
 ---
 
-## 9) Troubleshooting Ringkas
+## 11) Troubleshooting Ringkas
 
 ### 9.1 Blynk Input Tidak Masuk
 - Pastikan V1..V8 writeable.
@@ -207,7 +258,7 @@ platformio device monitor -b 115200
 
 ---
 
-## 10) Diagram Alur (Mermaid)
+## 12) Diagram Alur (Mermaid)
 
 ### 10.1 Flow Sampling dan Telemetry
 ```mermaid
@@ -248,7 +299,7 @@ flowchart TD
 
 ---
 
-## 11) Catatan Safety
+## 13) Catatan Safety
 
 - Jangan menyalakan motor tanpa beban terlalu lama.
 - Pastikan ground semua modul disatukan.
