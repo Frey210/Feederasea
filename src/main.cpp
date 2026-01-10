@@ -105,13 +105,12 @@ float lastTempCReal = NAN;  // sensor temp for diagnostics
 float lastFeedRemainingG = 0.0f;
 
 struct AppInputs {
-  bool simTempEnabled = true;
+  bool simMode = false;
   float simTempC = 28.0f;
   double biomassG = 0.0;
   int modeSelect = 0;
   int pwmPercent = 50;
   int gramsPerSec100 = 5;
-  bool simDistanceEnabled = false;
   float simDistanceCm = Config::H_TOTAL_CM;
   uint32_t lastSimTempUpdateMs = 0;
 };
@@ -133,6 +132,7 @@ String lcdLine2Cache;
 
 uint32_t lastBtnChangeMs = 0;
 int lastBtnState = HIGH;
+bool btnLatched = false;
 
 int lastSlotDayMorning = -1;
 int lastSlotDayEvening = -1;
@@ -296,11 +296,11 @@ static void samplingTask() {
   }
 
   float distanceRawCm = readUltrasonicCm();
-  float distanceCm = inputs.simDistanceEnabled ? inputs.simDistanceCm : distanceRawCm;
+  float distanceCm = inputs.simMode ? inputs.simDistanceCm : distanceRawCm;
   distanceCm = clampf(distanceCm, 0.0f, Config::H_TOTAL_CM);
   lastFeedRemainingG = estimateFeedMassG(distanceCm);
 
-  float effectiveTemp = inputs.simTempEnabled ? inputs.simTempC : lastTempCReal;
+  float effectiveTemp = inputs.simMode ? inputs.simTempC : lastTempCReal;
   if (!isnan(effectiveTemp)) {
     lastTempC = effectiveTemp;
   }
@@ -333,7 +333,7 @@ static void samplingTask() {
       (WiFi.status() == WL_CONNECTED) ? "OK" : "FAIL",
       Blynk.connected() ? "OK" : "FAIL",
       (unsigned long)((millis() - inputs.lastSimTempUpdateMs) / 1000UL),
-      inputs.simDistanceEnabled ? (int)round(inputs.simDistanceCm) : -1,
+      inputs.simMode ? (int)round(inputs.simDistanceCm) : -1,
       lastEventLabel.c_str());
   Serial.println(logbuf);
 }
@@ -348,8 +348,12 @@ static void handleButton() {
   }
 
   if (now - lastBtnChangeMs > Config::BTN_DEBOUNCE_MS) {
-    if (raw == LOW && !requests.manualFeed) {
+    if (raw == LOW && !btnLatched && !requests.manualFeed) {
       requests.manualFeed = true;
+      btnLatched = true;
+    }
+    if (raw == HIGH) {
+      btnLatched = false;
     }
   }
 }
@@ -450,10 +454,13 @@ BLYNK_WRITE_DEFAULT() {
 
 BLYNK_WRITE(VPIN_SIM_TEMP) {
   inputs.simTempC = param.asDouble();
-  inputs.simTempEnabled = true;
   inputs.lastSimTempUpdateMs = millis();
-  lastTempC = inputs.simTempC;
-  Serial.printf("Blynk V1 Sim_Temp=%.2fC (simulation ON)\n", inputs.simTempC);
+  if (inputs.simMode) {
+    lastTempC = inputs.simTempC;
+    Serial.printf("Blynk V1 Sim_Temp=%.2fC (simulation ON)\n", inputs.simTempC);
+  } else {
+    Serial.printf("Blynk V1 Sim_Temp=%.2fC (ignored, sim OFF)\n", inputs.simTempC);
+  }
 }
 
 BLYNK_WRITE(VPIN_BIOMASS) {
@@ -487,17 +494,22 @@ BLYNK_WRITE(VPIN_GPS_100) {
 }
 
 BLYNK_WRITE(VPIN_SIM_EVENT) {
-  if (param.asInt() == 1) {
+  int v = param.asInt();
+  inputs.simMode = (v == 1);
+  if (inputs.simMode) {
     requests.simEvent = true;
   }
-  Serial.printf("Blynk V7 Sim_Event=%d\n", param.asInt());
+  Serial.printf("Blynk V7 Sim_Event=%d (simMode=%d)\n", v, inputs.simMode ? 1 : 0);
 }
 
 BLYNK_WRITE(VPIN_TEST_IN) {
   float v = param.asFloat();
   inputs.simDistanceCm = v;
-  inputs.simDistanceEnabled = true;
-  Serial.printf("Blynk V8 Test_In=%.2fcm (sim distance ON)\n", v);
+  if (inputs.simMode) {
+    Serial.printf("Blynk V8 Test_In=%.2fcm (sim distance ON)\n", v);
+  } else {
+    Serial.printf("Blynk V8 Test_In=%.2fcm (ignored, sim OFF)\n", v);
+  }
   Blynk.virtualWrite(VPin::LAST_EVENT, String("V8=") + v);
 }
 
@@ -563,13 +575,17 @@ void loop() {
   handleButton();
   if (requests.manualFeed) {
     requests.manualFeed = false;
-    startFeedEvent(makeEventLabel("MANUAL"));
-    Blynk.virtualWrite(VPin::MANUAL_FEED, 0);
+    if (feedState == IDLE) {
+      startFeedEvent(makeEventLabel("MANUAL"));
+      Blynk.virtualWrite(VPin::MANUAL_FEED, 0);
+    }
   }
   if (requests.simEvent) {
     requests.simEvent = false;
-    startFeedEvent(makeEventLabel("SIM_EVT"));
-    Blynk.virtualWrite(VPin::SIM_EVENT, 0);
+    if (feedState == IDLE) {
+      startFeedEvent(makeEventLabel("SIM_EVT"));
+      Blynk.virtualWrite(VPin::SIM_EVENT, 0);
+    }
   }
   processSchedule();
   updateFeedState();
