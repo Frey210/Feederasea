@@ -1,306 +1,194 @@
-# Feederasea (ESP32 + Blynk + PlatformIO)
+# Feederasea (ESP32 + Arduino UNO)
 
-Firmware feeder otomatis berbasis ESP32 dengan Blynk IoT, sensor suhu DS18B20, sensor jarak HC-SR04, motor BTS7960, servo katup, dan LCD I2C 16x2.
-
-Dokumen ini menjelaskan konfigurasi, pin mapping, cara kerja, mode operasi, dan tutorial penggunaan.
+Project ini adalah feeder otomatis berbasis IoT. ESP32 menangani WiFi/Blynk, jadwal, dan komunikasi UART. Arduino UNO menangani sensor, perhitungan massa pakan, motor/servo, dan LCD.
 
 ---
 
-## 1) Ringkasan Fitur
-
-- Blynk IoT untuk kontrol dan telemetry.
-- DS18B20 membaca suhu air.
-- HC-SR04 membaca jarak pakan di hopper, dikonversi ke massa pakan (g).
-- Servo MG996R membuka dan menutup katup pakan.
-- Motor BTS7960 menggerakkan pakan sesuai durasi terhitung.
-- LCD I2C 16x2 menampilkan mode, suhu, jarak, dan estimasi pakan.
-- State machine non-blocking untuk dispensing.
-- Mode A/B/C sesuai suhu, biomassa, dan jadwal.
-
----
-
-## 2) Struktur Project (PlatformIO)
+## 1) Struktur Folder
 
 ```
 Feederasea/
-|-- platformio.ini
-|-- include/
-|   |-- secrets.h
-|-- src/
-|   |-- main.cpp
-|-- README.md
++- Feederasea-R3Wifi-ESP32/   # Firmware ESP32 (Blynk + WiFi + schedule + UART)
++- Feederasea-R3Wifi-UNO/     # Firmware UNO (sensor + aktuator + LCD)
 ```
 
 ---
 
-## 3) Daftar Komponen Lengkap
+## 2) Komponen Utama
 
-- ESP32 DevKit (ESP32-WROOM-32)
-- Sensor suhu DS18B20 + resistor 4.7k pull-up
-- Sensor jarak HC-SR04 + level shifter (atau divider) untuk ECHO 3.3V
-- Driver motor BTS7960
-- Motor DC + piringan pelontar pakan
-- Servo MG996R
+- ESP32 DevKit 38-pin
+- Arduino UNO R3
+- DS18B20 + resistor 4.7k (pull-up)
+- HC-SR04 (TRIG/ECHO, ECHO perlu level shift ke 3.3V)
+- Driver motor BTS7960 + motor DC
+- Servo (contoh MG996R)
 - LCD I2C 16x2 (alamat umum 0x27)
-- Push button manual + resistor pull-up eksternal
-- LED status + resistor, LED low feed + resistor
-- Power supply 12V (motor) dan 5V (ESP32, servo, sensor, LCD)
-- Step-down 12V ke 5V (contoh LM2596)
-- Kabel, terminal, dan konektor
+- Tombol manual, LED status, LED low feed
+- Power 12V (motor) + 5V (board/sensor), step-down 12V->5V
 
 ---
 
-## 4) Wiring Diagram (Text)
+## 3) Wiring Ringkas
 
-### Power
-- 12V: masuk ke BTS7960 untuk motor
-- 5V: ESP32, servo, DS18B20, HC-SR04, LCD
-- Semua GND disatukan (common ground)
+### UART ESP32 <-> UNO
+- UNO D0 (RX)  <- ESP32 TX0 (GPIO1)
+- UNO D1 (TX)  -> ESP32 RX0 (GPIO3) **wajib level shift 5V -> 3.3V**
+- GND harus common
 
-### DS18B20
-- VCC -> 3.3V
-- GND -> GND
-- DATA -> GPIO4 + resistor 4.7k ke 3.3V
-
-### HC-SR04
-- VCC -> 5V
-- GND -> GND
-- TRIG -> GPIO12
-- ECHO -> level-shift -> GPIO14
-
-### BTS7960
-- VCC -> 5V (logic)
-- GND -> GND
-- L_EN -> GPIO27
-- R_EN -> GPIO25
-- LPWM -> GPIO32
-- RPWM -> GPIO33
-- MOTOR+/- -> output driver ke motor DC
-
-### Servo MG996R
-- VCC -> 5V (supply terpisah lebih baik)
-- GND -> GND
-- SIG -> GPIO26
-
-### LCD I2C
-- VCC -> 5V
-- GND -> GND
-- SDA -> GPIO21
-- SCL -> GPIO22
-
-### LED dan Tombol
-- LED Status: GPIO2 -> resistor -> GND
-- LED Low Feed: GPIO15 -> resistor -> GND
-- Tombol manual: satu kaki ke GND, satu kaki ke GPIO34 + pull-up eksternal ke 3.3V
+### Sensor/Actuator di UNO (lihat detail di `Feederasea-R3Wifi-UNO/README.md`)
+- DS18B20 -> D4
+- HC-SR04 TRIG -> D12, ECHO -> D11 (level shift)
+- Servo -> D9
+- BTS7960: LPWM D5, RPWM D6, L_EN D7, R_EN D8
+- LCD I2C -> A4/A5
+- Button -> D2 (INPUT_PULLUP)
+- LED status D13, LED low feed D10
 
 ---
 
-## 5) List GPIO
+## 4) Setup dan Upload (PlatformIO)
 
-- GPIO2  : LED status
-- GPIO4  : DS18B20 data
-- GPIO12 : HC-SR04 TRIG
-- GPIO14 : HC-SR04 ECHO (level-shift)
-- GPIO15 : LED low feed
-- GPIO21 : I2C SDA (LCD)
-- GPIO22 : I2C SCL (LCD)
-- GPIO25 : BTS7960 R_EN
-- GPIO26 : Servo MG996R signal
-- GPIO27 : BTS7960 L_EN
-- GPIO32 : BTS7960 LPWM
-- GPIO33 : BTS7960 RPWM
-- GPIO34 : Manual button (input-only)
-
----
-
-## 6) Konfigurasi Blynk
-
-Template: `Feederasea`
-Auth Token: lihat `include/secrets.h`.
-
-### Datastream (Input dari App)
-- V1  `Sim_Temp` (Double, C)
-- V2  `Biomass` (Double, g)
-- V3  `Manual_Feed` (Integer, 0/1)
-- V4  `Mode_Select` (Integer, 0..2)
-- V5  `PWM_Percent` (Integer, 0..100)
-- V6  `GramPerSec_100` (Integer, 1..20)
-- V7  `Sim_Event` (Integer, 0/1)
-- V8  `Test_In` (Double, cm) -> simulated distance
-
-Pastikan datastream V1..V8 writeable (Input atau Input/Output) agar ESP32 menerima perubahan dari app.
-
-### Telemetry (Output ke App)
-- V20 `TempC` (suhu real dari DS18B20)
-- V21 `Feed_Remaining` (massa pakan tersisa)
-- V22 `Biomass_Out`
-- V23 `Last_Cmd_Grams`
-- V24 `Last_PWM`
-- V25 `Last_Event`
-
----
-
-## 7) Cara Kerja Utama
-
-Firmware berjalan dengan loop non-blocking menggunakan `Blynk.run()` dan `BlynkTimer`.
-
-### Sampling (tiap 2 detik)
-1. Baca DS18B20 (suhu real).
-2. Baca jarak HC-SR04 (atau gunakan nilai V8 jika simulasi jarak aktif).
-3. Konversi jarak ke massa pakan (model silinder).
-4. Update LCD dan kirim telemetry ke Blynk.
-
-### Estimasi Massa (Hopper Silinder)
-- `heightFilled = H_TOTAL_CM - distance_cm`
-- `volume = pi * radius_cm^2 * heightFilled`
-- `mass = volume * bulk_density`
-
-Parameter dapat dikalibrasi di `src/main.cpp`:
-- `H_TOTAL_CM`
-- `RADIUS_CM`
-- `BULK_DENSITY_G_PER_CM3`
-
----
-
-## 8) Mode Operasi (A/B/C)
-
-### Mode A (0)
-- Komando pakan tetap: 50 g per event.
-
-### Mode B (1)
-- Komando pakan berdasarkan suhu:
-  - 25 C sampai 37 C: 3% dari `Biomass`
-  - di luar rentang: 2% dari `Biomass`
-
-### Mode C (2)
-- Jadwal feeding pada 07:00 dan 17:00 (WITA, NTP).
-- Rumus komando sama dengan Mode B.
-- Guard agar tidak double trigger dalam hari yang sama.
-- Jika `Feed_Remaining < Commanded + 1g` maka abort, LED LOW_FEED menyala, log event `low_feed`.
-
----
-
-## 9) State Machine Feeding
-
-Urutan state:
-- `IDLE`
-- `PRECHECK`
-- `SERVO_OPENING`
-- `MOTOR_RUNNING`
-- `SERVO_CLOSING`
-- `POSTLOG`
-- `ABORT_LOW_FEED`
-
-Waktu utama:
-- Servo open settle: 800 ms
-- Servo close settle: 600 ms
-- Motor runtime: dihitung dari grams per second (dibatasi max 12 s)
-
-Rumus runtime:
-```
-GramsPerSec = GramPerSecAt100pct * (PWM_Percent / 100.0)
-Runtime_s = Commanded_grams / GramsPerSec
-Clamp runtime max 12s
-```
-
----
-
-## 10) Tutorial Penggunaan
-
-### Langkah 1: Wiring
-- Sambungkan komponen sesuai pin mapping di atas.
-- Pastikan semua GND tersambung menjadi satu.
-- ECHO HC-SR04 harus level-shift ke 3.3V.
-
-### Langkah 2: Setup WiFi dan Blynk
-- Buka `include/secrets.h`.
-- Isi `BLYNK_AUTH_TOKEN`, `WIFI_SSID`, dan `WIFI_PASS`.
-
-### Langkah 3: Build dan Upload
+### ESP32
+1. Buka folder `Feederasea-R3Wifi-ESP32`.
+2. Isi WiFi dan token di `Feederasea-R3Wifi-ESP32/include/secrets.h`.
+3. Build & upload:
 ```
 platformio run
 platformio run -t upload
-platformio device monitor -b 115200
+platformio device monitor -b 9600
 ```
 
-### Langkah 4: Konfigurasi Blynk App
-- Buat datastream V1..V8 dan V20..V25 sesuai list di atas.
-- Pastikan V1..V8 writeable.
-- Atur widget slider atau input sesuai kebutuhan.
+### UNO
+1. Buka folder `Feederasea-R3Wifi-UNO`.
+2. Build & upload:
+```
+platformio run
+platformio run -t upload
+platformio device monitor -b 9600
+```
 
-### Langkah 5: Operasi Harian
-- Pilih mode dengan V4 (0, 1, 2).
-- Atur `Biomass` di V2.
-- Atur `PWM_Percent` di V5 dan `GramPerSec_100` di V6 untuk kalibrasi laju.
-- Tekan `Manual_Feed` (V3) untuk feed manual.
-- Tekan `Sim_Event` (V7) untuk simulasi event.
-
-### Langkah 6: Simulasi Sensor
-- V1 `Sim_Temp` untuk simulasi suhu.
-- V8 `Test_In` untuk simulasi jarak pakan (cm).
+Catatan: Saat upload ESP32, lepaskan UART ke UNO agar tidak mengganggu flashing.
 
 ---
 
-## 11) Troubleshooting Ringkas
+## 5) Blynk Datastream
 
-### 9.1 Blynk Input Tidak Masuk
-- Pastikan V1..V8 writeable.
-- Pastikan device menggunakan auth token yang benar.
-- Cek Serial log: `Blynk Vx ...` harus muncul saat nilai diubah.
+### Input (dari app)
+- V1  `Sim_Temp` (C)
+- V2  `Biomass` (g)
+- V3  `Manual_Feed` (0/1)
+- V4  `Mode_Select` (0..2)
+- V5  `PWM_Percent` (0..100)
+- V6  `GramPerSec_100` (1..20)
+- V7  `Sim_Event` (0/1)
+- V8  `Test_In` (cm)
 
-### 9.2 Feed Remaining Selalu 0
-- Pastikan HC-SR04 membaca jarak (cek `Dist` di serial).
-- Set `H_TOTAL_CM` sesuai jarak kosong.
-- Pastikan echo level-shift dan sensor diberi 5V.
-
-### 9.3 Suhu Real NaN
-- DS18B20 belum terbaca, cek wiring dan resistor pull-up 4.7k ke 3.3V.
+### Output (ke app)
+- V20 `TempC`
+- V21 `Feed_Remaining`
+- V22 `Biomass_Out`
+- V23 `Last_Cmd_Grams`
+- V24 `Last_PWM`
+- V25 `Last_Event` (log status, cocok untuk Widget Terminal)
 
 ---
 
-## 12) Diagram Alur (Mermaid)
+## 6) Mode Operasi
 
-### 10.1 Flow Sampling dan Telemetry
+- Mode A (0): komando pakan tetap 50g.
+- Mode B (1): 25-37C = 3% biomassa, di luar = 2%.
+- Mode C (2): jadwal otomatis jam 07:00 dan 17:00 (WITA), rumus sama dengan Mode B.
+
+---
+
+## 7) Flow Diagram (Mermaid)
+
 ```mermaid
 flowchart TD
-  A[Timer 2s] --> B[Read DS18B20]
-  B --> C[Read HC-SR04]
-  C --> D[Apply sim distance V8]
-  D --> E[Compute Feed Mass]
-  E --> F[Update LCD]
-  F --> G[Send Telemetry to Blynk]
-```
+  A[ESP32 Boot] --> B[WiFi + Blynk Connect]
+  B --> C[Sync Datastream Input]
+  C --> D[Send Config -> UNO]
+  D --> E[UNO Read Sensor + Update LCD]
+  E --> F[UNO Send Telemetry -> ESP32]
+  F --> G[ESP32 Update Blynk Widgets]
+  G --> H[Check Schedule Mode C]
+  H --> D
 
-### 10.2 Feeding State Machine
-```mermaid
-stateDiagram-v2
-  [*] --> IDLE
-  IDLE --> PRECHECK: trigger feed
-  PRECHECK --> ABORT_LOW_FEED: Mode C and feed insufficient
-  PRECHECK --> SERVO_OPENING: ok
-  SERVO_OPENING --> MOTOR_RUNNING: after 800ms
-  MOTOR_RUNNING --> SERVO_CLOSING: runtime done
-  SERVO_CLOSING --> POSTLOG: after 600ms
-  POSTLOG --> IDLE
-  ABORT_LOW_FEED --> IDLE: after 3s
-```
-
-### 10.3 Mode Selection Logic
-```mermaid
-flowchart TD
-  A[Trigger Event] --> B{Mode Select}
-  B -->|A| C[Command 50g]
-  B -->|B| D[Command 2 or 3 percent Biomass]
-  B -->|C| E[Schedule 07:00 17:00 and Temp Rule]
-  C --> F[Compute Runtime]
-  D --> F
-  E --> F
+  I[User Action in Blynk] --> D
+  J[Manual Button UNO] --> K[Feed Event]
+  K --> F
 ```
 
 ---
 
-## 13) Catatan Safety
+## 8) Panduan Penggunaan (User Guide)
 
+### A) Mode Feeding
+- **Mode A (0)**: Pakan tetap 50g per event.
+- **Mode B (1)**: Pakan berdasarkan suhu (25-37C = 3% biomassa, di luar = 2%).
+- **Mode C (2)**: Sama dengan Mode B, tetapi otomatis pada 07:00 dan 17:00 (WITA).
+
+### B) Interface Kontrol (Blynk Input)
+- **V3 Manual_Feed**: Tombol manual untuk men-trigger pakan.
+- **V4 Mode_Select**: Pilih mode A/B/C (0/1/2).
+- **V5 PWM_Percent**: Kecepatan motor (%).
+- **V6 GramPerSec_100**: Kalibrasi laju pakan pada PWM 100%.
+- **V2 Biomass**: Total biomassa ikan (gram), dipakai di Mode B/C.
+- **V7 Sim_Event**: Aktifkan simulasi dan trigger event simulasi.
+- **V1 Sim_Temp** dan **V8 Test_In**: Input simulasi suhu dan jarak (aktif saat V7=1).
+
+### C) Interface Monitoring (Blynk Output)
+- **V20 TempC**: Suhu efektif (real/simulasi).
+- **V21 Feed_Remaining**: Estimasi sisa pakan di hopper.
+- **V22 Biomass_Out**: Biomassa saat ini (echo dari input).
+- **V23 Last_Cmd_Grams**: Gram perintah terakhir.
+- **V24 Last_PWM**: PWM terakhir yang dipakai.
+- **V25 Last_Event**: Log status ringkas (disarankan widget Terminal).
+
+### D) Alur Operasi Singkat
+1. Nyalakan alat, ESP32 connect WiFi dan Blynk.
+2. Atur biomassa (V2), mode (V4), dan kalibrasi (V6, V5).
+3. Untuk manual feed, tekan V3.
+4. Untuk mode jadwal, pilih Mode C dan biarkan sistem otomatis.
+5. Pantau V20-V25 untuk status dan hasil event.
+
+---
+
+## 9) Protokol Serial (ESP32 <-> UNO)
+
+ESP32 -> UNO:
+- `SET:MODE=0|1|2`
+- `SET:BIOMASS=xxxx`
+- `SET:PWM=0..100`
+- `SET:GPS100=1..20`
+- `SET:SIM_MODE=0|1`
+- `SET:SIM_TEMP=xx.xx`
+- `SET:SIM_DIST=xx.xx`
+- `CMD:MANUAL`
+- `CMD:SIM_EVT`
+- `CMD:SCHED_07`
+- `CMD:SCHED_17`
+
+UNO -> ESP32:
+```
+TELEM,T=xx.xx,TR=yy.yy,DIST=zz.z,FEED=nnn,MODE=m,STATE=s,EVENT=LABEL,BIOMASS=bbbb,CMD=ccc,PWM=pp,SIM=0|1
+```
+
+---
+
+## 10) Troubleshooting
+
+- Blynk nilai 0: cek UART UNO<->ESP32 (RX/TX, GND, level shift), baud 9600.
+- `STALE` di V25: telemetry dari UNO tidak masuk atau terputus.
+- LCD stuck "Feeding...": cek tombol manual (gunakan INPUT_PULLUP).
+- Motor tidak jalan: cek supply 12V dan wiring BTS7960.
+
+---
+
+## 11) Catatan Keamanan
+
+- Jangan commit `include/secrets.h` ke repo publik jika berisi token/SSID asli.
+- Gunakan level shifting untuk sinyal 5V -> 3.3V (UNO TX dan HC-SR04 ECHO).
 - Jangan menyalakan motor tanpa beban terlalu lama.
-- Pastikan ground semua modul disatukan.
-- HC-SR04 sebaiknya diberi 5V dan echo di level-shift ke 3.3V.
+- Pastikan semua ground tersambung (common ground).
+
