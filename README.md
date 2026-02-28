@@ -19,7 +19,7 @@ Feederasea/
 - ESP32 DevKit 38-pin
 - Arduino UNO R3
 - DS18B20 + resistor 4.7k (pull-up)
-- HC-SR04 (TRIG/ECHO, ECHO perlu level shift ke 3.3V)
+- VL53L1X (ToF, I2C)
 - Driver motor BTS7960 + motor DC
 - Servo (contoh MG996R)
 - LCD I2C 16x2 (alamat umum 0x27)
@@ -37,7 +37,7 @@ Feederasea/
 
 ### Sensor/Actuator di UNO (lihat detail di `Feederasea-R3Wifi-UNO/README.md`)
 - DS18B20 -> D4
-- HC-SR04 TRIG -> D12, ECHO -> D11 (level shift)
+- VL53L1X -> SDA A4, SCL A5 (I2C shared dengan LCD)
 - Servo -> D9
 - BTS7960: LPWM D5, RPWM D6, L_EN D7, R_EN D8
 - LCD I2C -> A4/A5
@@ -121,7 +121,29 @@ flowchart TD
 
 ---
 
-## 8) Panduan Penggunaan (User Guide)
+## 8) Algoritma Estimasi Sisa Pakan (Jarak -> Gram)
+
+Estimasi `Feed_Remaining` di UNO memakai data jarak VL53L1X dan tabel kalibrasi berbasis timbangan nyata:
+
+1. UNO membaca jarak VL53L1X dan mengambil rata-rata beberapa sampel valid.
+2. Jarak diproses dengan filter adaptif:
+   - perubahan besar -> alpha cepat (responsif),
+   - perubahan kecil -> alpha lambat (lebih stabil),
+   - deadband kecil untuk menahan jitter.
+3. Jarak hasil filter dikonversi ke gram dengan interpolasi linear bertahap (piecewise) dari titik kalibrasi.
+4. Di area jarak kosong diterapkan `zero-band`, sehingga pembacaan hopper kosong tetap 0 gram walau ada noise kecil.
+5. Nilai hasil dikirim ke ESP32 lewat telemetry UART (`TELEM,...`) dan dipublish ke Blynk (V21).
+
+Parameter utama tuning ada di `Feederasea-R3Wifi-UNO/src/main.ino`:
+- `DIST_EMPTY_CM`
+- `DIST_SLOW_ALPHA`, `DIST_FAST_ALPHA`
+- `DIST_FAST_THRESHOLD_CM`, `DIST_JITTER_CM`
+- `EMPTY_ZERO_BAND_CM`
+- Titik kalibrasi di fungsi `estimateFeedMassG()`
+
+---
+
+## 9) Panduan Penggunaan (User Guide)
 
 ### A) Mode Feeding
 - **Mode A (0)**: Pakan tetap 50g per event.
@@ -154,7 +176,7 @@ flowchart TD
 
 ---
 
-## 9) Protokol Serial (ESP32 <-> UNO)
+## 10) Protokol Serial (ESP32 <-> UNO)
 
 ESP32 -> UNO:
 - `SET:MODE=0|1|2`
@@ -176,7 +198,7 @@ TELEM,T=xx.xx,TR=yy.yy,DIST=zz.z,FEED=nnn,MODE=m,STATE=s,EVENT=LABEL,BIOMASS=bbb
 
 ---
 
-## 10) Troubleshooting
+## 11) Troubleshooting
 
 - Blynk nilai 0: cek UART UNO<->ESP32 (RX/TX, GND, level shift), baud 9600.
 - `STALE` di V25: telemetry dari UNO tidak masuk atau terputus.
@@ -185,10 +207,10 @@ TELEM,T=xx.xx,TR=yy.yy,DIST=zz.z,FEED=nnn,MODE=m,STATE=s,EVENT=LABEL,BIOMASS=bbb
 
 ---
 
-## 11) Catatan Keamanan
+## 12) Catatan Keamanan
 
 - Jangan commit `include/secrets.h` ke repo publik jika berisi token/SSID asli.
-- Gunakan level shifting untuk sinyal 5V -> 3.3V (UNO TX dan HC-SR04 ECHO).
+- Gunakan level shifting untuk sinyal 5V -> 3.3V (minimal UNO TX -> ESP32 RX).
 - Jangan menyalakan motor tanpa beban terlalu lama.
 - Pastikan semua ground tersambung (common ground).
 
