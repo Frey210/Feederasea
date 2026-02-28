@@ -123,23 +123,91 @@ flowchart TD
 
 ## 8) Algoritma Estimasi Sisa Pakan (Jarak -> Gram)
 
-Estimasi `Feed_Remaining` di UNO memakai data jarak VL53L1X dan tabel kalibrasi berbasis timbangan nyata:
+Estimasi `Feed_Remaining` di UNO dihitung dari jarak VL53L1X menggunakan pipeline matematis berikut.
 
-1. UNO membaca jarak VL53L1X dan mengambil rata-rata beberapa sampel valid.
-2. Jarak diproses dengan filter adaptif:
-   - perubahan besar -> alpha cepat (responsif),
-   - perubahan kecil -> alpha lambat (lebih stabil),
-   - deadband kecil untuk menahan jitter.
-3. Jarak hasil filter dikonversi ke gram dengan interpolasi linear bertahap (piecewise) dari titik kalibrasi.
-4. Di area jarak kosong diterapkan `zero-band`, sehingga pembacaan hopper kosong tetap 0 gram walau ada noise kecil.
-5. Nilai hasil dikirim ke ESP32 lewat telemetry UART (`TELEM,...`) dan dipublish ke Blynk (V21).
+### A) Definisi Variabel
+- `d_raw(k)` : jarak mentah pembacaan ke-`k` (cm), hasil rata-rata beberapa sampel valid.
+- `d_cal(k)` : jarak setelah koreksi skala/offset.
+- `d_f(k)` : jarak terfilter (cm), dipakai untuk perhitungan massa.
+- `m(k)` : estimasi massa pakan (gram).
+- `alpha_fast`, `alpha_slow` : koefisien filter cepat/lambat.
+- `delta_th` : ambang perubahan untuk memilih filter cepat/lambat.
+- `jitter_band` : deadband perubahan minimum (cm).
+- `d_empty` : jarak saat hopper kosong (`DIST_EMPTY_CM`).
+- `zero_band` : toleransi area kosong (`EMPTY_ZERO_BAND_CM`).
 
-Parameter utama tuning ada di `Feederasea-R3Wifi-UNO/src/main.ino`:
-- `DIST_EMPTY_CM`
-- `DIST_SLOW_ALPHA`, `DIST_FAST_ALPHA`
-- `DIST_FAST_THRESHOLD_CM`, `DIST_JITTER_CM`
-- `EMPTY_ZERO_BAND_CM`
-- Titik kalibrasi di fungsi `estimateFeedMassG()`
+### B) Akuisisi Sensor
+Untuk setiap siklus, UNO mengambil `N` sampel valid dari VL53L1X, lalu:
+
+`d_raw(k) = (1 / N) * sum(d_i), i = 1..N`
+
+Jika tidak ada sampel valid (timeout), firmware menahan nilai terakhir:
+
+`d_raw(k) = d_f(k-1)`
+
+### C) Koreksi Skala dan Offset
+Jarak hasil sensor dikoreksi:
+
+`d_cal(k) = DIST_SCALE * d_raw(k) + DIST_OFFSET_CM`
+
+### D) Filter Adaptif (Responsif tapi Stabil)
+Hitung besar perubahan:
+
+`Delta(k) = |d_cal(k) - d_f(k-1)|`
+
+Pilih koefisien:
+- jika `Delta(k) >= DIST_FAST_THRESHOLD_CM` -> `alpha = DIST_FAST_ALPHA`
+- jika `Delta(k) < DIST_FAST_THRESHOLD_CM` -> `alpha = DIST_SLOW_ALPHA`
+
+Update filter eksponensial:
+
+`d_tmp(k) = alpha * d_cal(k) + (1 - alpha) * d_f(k-1)`
+
+Deadband jitter:
+- jika `|d_tmp(k) - d_f(k-1)| < DIST_JITTER_CM` -> `d_f(k) = d_f(k-1)`
+- selain itu -> `d_f(k) = d_tmp(k)`
+
+### E) Konversi Jarak ke Massa (Piecewise Linear)
+Gunakan titik kalibrasi `(d_j, m_j)` dari hasil timbangan nyata, urut dari kosong ke penuh.
+Untuk `d_f(k)` yang berada di antara `d_hi` dan `d_lo`:
+
+`t = (d_hi - d_f(k)) / (d_hi - d_lo)`
+
+`m(k) = m_hi + t * (m_lo - m_hi)`
+
+Ini adalah interpolasi linear per-segmen (piecewise).
+
+### F) Zero-Band pada Kondisi Kosong
+Ambang kosong:
+
+`d_zero_th = d_empty - zero_band`
+
+Jika `d_f(k) >= d_zero_th`, maka dipaksa:
+
+`m(k) = 0`
+
+Selain itu, firmware juga menerapkan cutoff massa kecil (mis. `< 20 g`) ke nol untuk menahan noise residual.
+
+### G) Contoh Hitung Singkat
+Misal:
+- `d_f(k-1) = 40.0 cm`
+- `d_cal(k) = 39.2 cm`
+- `DIST_FAST_THRESHOLD_CM = 1.0`
+- `DIST_SLOW_ALPHA = 0.25`
+
+Maka:
+- `Delta = 0.8 < 1.0` -> pakai alpha lambat `0.25`
+- `d_tmp = 0.25*39.2 + 0.75*40.0 = 39.8 cm`
+- Jika lolos deadband, `d_f(k) = 39.8 cm`
+- Jika `d_empty = 40.0` dan `zero_band = 1.2`, maka `d_zero_th = 38.8`
+- Karena `39.8 >= 38.8`, hasil akhir `m(k) = 0 g`
+
+### H) Parameter Tuning (File UNO)
+Lokasi: `Feederasea-R3Wifi-UNO/src/main.ino`
+- Zero point: `DIST_EMPTY_CM`, `EMPTY_ZERO_BAND_CM`
+- Respons filter: `DIST_SLOW_ALPHA`, `DIST_FAST_ALPHA`, `DIST_FAST_THRESHOLD_CM`, `DIST_JITTER_CM`
+- Mapping gram: titik kalibrasi di `estimateFeedMassG()`
+- Koreksi sensor: `DIST_SCALE`, `DIST_OFFSET_CM`
 
 ---
 
