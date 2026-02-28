@@ -4,12 +4,11 @@
 #include <DallasTemperature.h>
 #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
+#include <VL53L1X.h>
 #include <Wire.h>
 
 namespace Pins {
 static const uint8_t DS18B20 = 4;
-static const uint8_t ULTRASONIC_TRIG = 12;
-static const uint8_t ULTRASONIC_ECHO = 11;
 static const uint8_t SERVO = 9;
 static const uint8_t MOTOR_L_PWM = 5;
 static const uint8_t MOTOR_R_PWM = 6;
@@ -22,24 +21,35 @@ static const uint8_t LED_LOW_FEED = 10;
 }  // namespace Pins
 
 namespace Config {
-static const uint32_t SAMPLE_INTERVAL_MS = 2000;
-static const float H_TOTAL_CM = 25.0f;
-static const float RADIUS_CM = 7.5f;
-static const float BULK_DENSITY_G_PER_CM3 = 0.55f;
+static const uint32_t SAMPLE_INTERVAL_MS = 1000;
+static const float DIST_SENSOR_MAX_CM = 60.0f;
 static const float MASS_MIN_G = 0.0f;
 static const float MASS_MAX_G = 50000.0f;
+static const float SENSOR_MOUNT_DROP_CM = 4.2f;
+static const float DIST_EMPTY_CM = 40.0f;
 static const uint32_t BTN_DEBOUNCE_MS = 60;
 static const int SERVO_OPEN_DEG = 45;
 static const int SERVO_CLOSE_DEG = 0;
 static const uint32_t SERVO_STABILIZE_MS = 800;
 static const uint32_t SERVO_SETTLE_MS = 600;
 static const uint32_t SERIAL_BAUD = 9600;
+static const float DIST_OFFSET_CM = 0.0f;
+static const float DIST_SCALE = 1.0f;
+static const bool DEBUG_DISTANCE = false;
+static const float DIST_SLOW_ALPHA = 0.25f;
+static const float DIST_FAST_ALPHA = 0.65f;
+static const float DIST_FAST_THRESHOLD_CM = 1.0f;
+static const float DIST_JITTER_CM = 0.12f;
+static const float EMPTY_ZERO_BAND_CM = 1.2f;
+static const uint16_t TOF_TIMING_BUDGET_US = 50000;
+static const uint16_t TOF_PERIOD_MS = 60;
 }  // namespace Config
 
 OneWire oneWire(Pins::DS18B20);
 DallasTemperature dallas(&oneWire);
 LiquidCrystal_I2C lcd(Pins::LCD_ADDR, 16, 2);
 Servo valveServo;
+VL53L1X tofSensor;
 
 enum FeedState {
   IDLE,
@@ -54,7 +64,7 @@ enum FeedState {
 struct AppInputs {
   bool simMode = false;
   float simTempC = 28.0f;
-  float simDistanceCm = Config::H_TOTAL_CM;
+  float simDistanceCm = Config::DIST_EMPTY_CM;
   double biomassG = 0.0;
   int modeSelect = 0;
   int pwmPercent = 50;
@@ -77,7 +87,9 @@ uint32_t motorRunMs = 0;
 float lastTempC = NAN;
 float lastTempCReal = NAN;
 float lastFeedRemainingG = 0.0f;
-float lastDistanceCm = Config::H_TOTAL_CM;
+float lastDistanceCm = Config::DIST_EMPTY_CM;
+bool lastDistanceValid = false;
+bool tofReady = false;
 
 int lastCmdGrams = 0;
 int lastPwm = 0;
@@ -132,44 +144,75 @@ static void motorForward(int pwm) {
   analogWrite(Pins::MOTOR_R_PWM, duty);
 }
 
-static float readUltrasonicCm() {
-  const int samples = 5;
+static float readDistanceCm() {
+  if (!tofReady) {
+    return NAN;
+  }
+
+  const int samples = 3;
   float sum = 0.0f;
   int valid = 0;
 
   for (int i = 0; i < samples; i++) {
-    digitalWrite(Pins::ULTRASONIC_TRIG, LOW);
-    delayMicroseconds(2);
-    digitalWrite(Pins::ULTRASONIC_TRIG, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(Pins::ULTRASONIC_TRIG, LOW);
-
-    unsigned long duration = pulseIn(Pins::ULTRASONIC_ECHO, HIGH, 30000);
-    float distanceCm;
-
-    if (duration == 0) {
-      distanceCm = Config::H_TOTAL_CM;
-    } else {
-      distanceCm = (duration * 0.0343f) / 2.0f;
+    uint16_t mm = tofSensor.read();
+    float distanceCm = mm / 10.0f;
+    if (tofSensor.timeoutOccurred()) {
+      distanceCm = NAN;
     }
 
-    if (distanceCm >= 1.0f && distanceCm <= 400.0f) {
+    if (!isnan(distanceCm) && distanceCm >= 1.0f && distanceCm <= Config::DIST_SENSOR_MAX_CM) {
       sum += distanceCm;
       valid++;
     }
-    delay(10);
+    delay(5);
   }
 
   if (valid == 0) {
-    return Config::H_TOTAL_CM;
+    return NAN;
   }
   return sum / valid;
 }
 
 static float estimateFeedMassG(float distanceCm) {
-  float heightFilled = clampf(Config::H_TOTAL_CM - distanceCm, 0.0f, Config::H_TOTAL_CM);
-  float volume = PI * Config::RADIUS_CM * Config::RADIUS_CM * heightFilled;
-  float mass = volume * Config::BULK_DENSITY_G_PER_CM3;
+  struct CalPoint {
+    float distCm;
+    float massG;
+  };
+
+  static const CalPoint points[] = {
+      {Config::DIST_EMPTY_CM, 0.0f},
+      {Config::DIST_EMPTY_CM - 14.5f, 200.0f},
+      {Config::DIST_EMPTY_CM - 17.6f, 400.0f},
+      {Config::DIST_EMPTY_CM - 23.7f, 800.0f},
+      {Config::DIST_EMPTY_CM - 27.0f, 1000.0f},
+  };
+
+  const int count = sizeof(points) / sizeof(points[0]);
+  float emptyThresholdCm = points[0].distCm - Config::EMPTY_ZERO_BAND_CM;
+  if (distanceCm >= emptyThresholdCm) {
+    return points[0].massG;
+  }
+
+  for (int i = 1; i < count; i++) {
+    float dHi = points[i - 1].distCm;
+    float dLo = points[i].distCm;
+    if (distanceCm <= dHi && distanceCm >= dLo) {
+      float t = (dHi - distanceCm) / (dHi - dLo);
+      float mass = points[i - 1].massG + t * (points[i].massG - points[i - 1].massG);
+      if (mass < 20.0f) {
+        mass = 0.0f;
+      }
+      return clampf(mass, Config::MASS_MIN_G, Config::MASS_MAX_G);
+    }
+  }
+
+  float dHi = points[count - 2].distCm;
+  float dLo = points[count - 1].distCm;
+  float t = (dHi - distanceCm) / (dHi - dLo);
+  float mass = points[count - 2].massG + t * (points[count - 1].massG - points[count - 2].massG);
+  if (mass < 20.0f) {
+    mass = 0.0f;
+  }
   return clampf(mass, Config::MASS_MIN_G, Config::MASS_MAX_G);
 }
 
@@ -207,19 +250,43 @@ static void startFeedEvent(const char *eventLabel) {
 }
 
 static void sendTelemetry() {
+  char tBuf[16];
+  char trBuf[16];
+  char distBuf[16];
+  char feedBuf[16];
+  char biomassBuf[16];
   char buf[220];
+
+  auto formatFloat = [](char *out, size_t outLen, float v, uint8_t decimals) {
+    if (isnan(v)) {
+      strncpy(out, "nan", outLen);
+      out[outLen - 1] = '\0';
+      return;
+    }
+    dtostrf(v, 0, decimals, out);
+    while (out[0] == ' ') {
+      memmove(out, out + 1, strlen(out));
+    }
+  };
+
+  formatFloat(tBuf, sizeof(tBuf), lastTempC, 2);
+  formatFloat(trBuf, sizeof(trBuf), lastTempCReal, 2);
+  formatFloat(distBuf, sizeof(distBuf), lastDistanceCm, 1);
+  formatFloat(feedBuf, sizeof(feedBuf), lastFeedRemainingG, 0);
+  formatFloat(biomassBuf, sizeof(biomassBuf), inputs.biomassG, 0);
+
   snprintf(
       buf,
       sizeof(buf),
-      "TELEM,T=%.2f,TR=%.2f,DIST=%.1f,FEED=%.0f,MODE=%d,STATE=%d,EVENT=%s,BIOMASS=%.0f,CMD=%d,PWM=%d,SIM=%d",
-      lastTempC,
-      lastTempCReal,
-      lastDistanceCm,
-      lastFeedRemainingG,
+      "TELEM,T=%s,TR=%s,DIST=%s,FEED=%s,MODE=%d,STATE=%d,EVENT=%s,BIOMASS=%s,CMD=%d,PWM=%d,SIM=%d",
+      tBuf,
+      trBuf,
+      distBuf,
+      feedBuf,
       inputs.modeSelect,
       (int)feedState,
       lastEventLabel,
-      inputs.biomassG,
+      biomassBuf,
       lastCmdGrams,
       lastPwm,
       inputs.simMode ? 1 : 0);
@@ -233,11 +300,38 @@ static void samplingTask() {
     lastTempCReal = tempC;
   }
 
-  float distanceRawCm = readUltrasonicCm();
+  float distanceRawCm = readDistanceCm();
   float distanceCm = inputs.simMode ? inputs.simDistanceCm : distanceRawCm;
-  distanceCm = clampf(distanceCm, 0.0f, Config::H_TOTAL_CM);
+  if (!inputs.simMode && isnan(distanceRawCm)) {
+    distanceCm = lastDistanceCm;
+  } else {
+    distanceCm = distanceCm * Config::DIST_SCALE + Config::DIST_OFFSET_CM;
+  }
+  if (!inputs.simMode) {
+    if (lastDistanceValid) {
+      float delta = fabsf(distanceCm - lastDistanceCm);
+      float alpha = (delta >= Config::DIST_FAST_THRESHOLD_CM) ? Config::DIST_FAST_ALPHA : Config::DIST_SLOW_ALPHA;
+      float filtered = (alpha * distanceCm) + ((1.0f - alpha) * lastDistanceCm);
+      if (fabsf(filtered - lastDistanceCm) < Config::DIST_JITTER_CM) {
+        filtered = lastDistanceCm;
+      }
+      distanceCm = filtered;
+    }
+    lastDistanceValid = true;
+  }
+  if (Config::DEBUG_DISTANCE) {
+    Serial.print("RAW=");
+    if (isnan(distanceRawCm)) Serial.print("nan");
+    else Serial.print(distanceRawCm, 2);
+    Serial.print(", RAW_TANKREF=");
+    if (isnan(distanceRawCm)) Serial.print("nan");
+    else Serial.print(distanceRawCm + Config::SENSOR_MOUNT_DROP_CM, 2);
+    Serial.print(", CAL=");
+    Serial.println(distanceCm, 2);
+  }
+  float distanceForFeed = clampf(distanceCm, 0.0f, Config::DIST_SENSOR_MAX_CM);
   lastDistanceCm = distanceCm;
-  lastFeedRemainingG = estimateFeedMassG(distanceCm);
+  lastFeedRemainingG = estimateFeedMassG(distanceForFeed);
 
   float effectiveTemp = inputs.simMode ? inputs.simTempC : lastTempCReal;
   if (!isnan(effectiveTemp)) {
@@ -395,9 +489,6 @@ static void pollSerial() {
 void setup() {
   Serial.begin(Config::SERIAL_BAUD);
 
-  pinMode(Pins::ULTRASONIC_TRIG, OUTPUT);
-  pinMode(Pins::ULTRASONIC_ECHO, INPUT);
-
   pinMode(Pins::MOTOR_L_PWM, OUTPUT);
   pinMode(Pins::MOTOR_R_PWM, OUTPUT);
   pinMode(Pins::MOTOR_L_EN, OUTPUT);
@@ -420,6 +511,16 @@ void setup() {
   lcdSetLines("Booting...", "Please wait");
 
   dallas.begin();
+
+  tofSensor.setTimeout(70);
+  tofReady = tofSensor.init();
+  if (tofReady) {
+    tofSensor.setDistanceMode(VL53L1X::Long);
+    tofSensor.setMeasurementTimingBudget(Config::TOF_TIMING_BUDGET_US);
+    tofSensor.startContinuous(Config::TOF_PERIOD_MS);
+  } else {
+    lcdSetLines("VL53L1X FAIL", "Check wiring");
+  }
 }
 
 void loop() {
