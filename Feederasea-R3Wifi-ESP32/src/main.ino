@@ -8,6 +8,9 @@
 
 namespace Config {
 static const uint32_t UART_BAUD = 9600;
+static const uint32_t MONITOR_BAUD = 115200;
+static const int UART2_RX_PIN = 16;
+static const int UART2_TX_PIN = 17;
 static const uint32_t SAMPLE_INTERVAL_MS = 2000;
 static const uint32_t BLYNK_CONNECT_TIMEOUT_MS = 5000;
 static const uint32_t WIFI_TIMEOUT_MS = 15000;
@@ -90,9 +93,10 @@ struct Telemetry {
 
 static Telemetry telem;
 static bool telemetryDirty = false;
+static HardwareSerial &unoUart = Serial2;
 
 static void sendToUno(const String &line) {
-  Serial.println(line);
+  unoUart.println(line);
 }
 
 static bool timeValid() {
@@ -293,8 +297,8 @@ static void processSerialLine(const String &line) {
 }
 
 static void pollSerial() {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
+  while (unoUart.available() > 0) {
+    char c = (char)unoUart.read();
     if (c == '\n') {
       if (serialLine.length() > 0) {
         processSerialLine(serialLine);
@@ -407,7 +411,8 @@ BLYNK_WRITE(VPIN_TEST_IN) {
 }
 
 void setup() {
-  Serial.begin(Config::UART_BAUD);
+  Serial.begin(Config::MONITOR_BAUD);
+  unoUart.begin(Config::UART_BAUD, SERIAL_8N1, Config::UART2_RX_PIN, Config::UART2_TX_PIN);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);

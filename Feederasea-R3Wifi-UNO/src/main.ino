@@ -28,11 +28,13 @@ static const float MASS_MAX_G = 50000.0f;
 static const float SENSOR_MOUNT_DROP_CM = 4.2f;
 static const float DIST_EMPTY_CM = 40.0f;
 static const uint32_t BTN_DEBOUNCE_MS = 60;
-static const int SERVO_OPEN_DEG = 45;
+static const int SERVO_OPEN_DEG = 30;
 static const int SERVO_CLOSE_DEG = 0;
+static const uint32_t MOTOR_PRESPIN_MS = 600;
 static const uint32_t SERVO_STABILIZE_MS = 800;
 static const uint32_t SERVO_SETTLE_MS = 600;
 static const uint32_t SERIAL_BAUD = 9600;
+static const float MAX_MOTOR_RUNTIME_S = 60.0f;
 static const float DIST_OFFSET_CM = 0.0f;
 static const float DIST_SCALE = 1.0f;
 static const bool DEBUG_DISTANCE = false;
@@ -241,7 +243,7 @@ static void startFeedEvent(const char *eventLabel) {
   if (gramsPerSec < 0.1) gramsPerSec = 0.1;
 
   double runtimeS = lastCmdGrams / gramsPerSec;
-  if (runtimeS > 12.0) runtimeS = 12.0;
+  if (runtimeS > Config::MAX_MOTOR_RUNTIME_S) runtimeS = Config::MAX_MOTOR_RUNTIME_S;
 
   motorRunMs = (uint32_t)(runtimeS * 1000.0);
 
@@ -391,14 +393,18 @@ static void updateFeedState() {
           break;
         }
       }
-      valveServo.write(Config::SERVO_OPEN_DEG);
+      // Start spinner first so pellets near the outlet are already moving
+      // before the valve opens, reducing jams at gate opening.
+      motorForward(inputs.pwmPercent);
       feedState = SERVO_OPENING;
       stateStartMs = now;
       break;
 
     case SERVO_OPENING:
-      if (now - stateStartMs >= Config::SERVO_STABILIZE_MS) {
-        motorForward(inputs.pwmPercent);
+      if (now - stateStartMs >= Config::MOTOR_PRESPIN_MS) {
+        valveServo.write(Config::SERVO_OPEN_DEG);
+      }
+      if (now - stateStartMs >= (Config::MOTOR_PRESPIN_MS + Config::SERVO_STABILIZE_MS)) {
         feedState = MOTOR_RUNNING;
         stateStartMs = now;
       }
