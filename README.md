@@ -77,7 +77,7 @@ Catatan: Saat upload ESP32, lepaskan UART ke UNO agar tidak mengganggu flashing.
 - V1  `Sim_Temp` (C)
 - V2  `Biomass` (g)
 - V3  `Manual_Feed` (0/1)
-- V4  `Mode_Select` (0..2)
+- V4  `Mode_Select` (0..3)
 - V5  `PWM_Percent` (0..100)
 - V6  `GramPerSec_100` (1..20)
 - V7  `Sim_Event` (0/1)
@@ -98,6 +98,15 @@ Catatan: Saat upload ESP32, lepaskan UART ke UNO agar tidak mengganggu flashing.
 - Mode A (0): komando pakan tetap 50g.
 - Mode B (1): 25-37C = 3% biomassa, di luar = 2%.
 - Mode C (2): jadwal otomatis jam 07:00 dan 17:00 (WITA), rumus sama dengan Mode B.
+- Mode D (3): jadwal otomatis tetap jam 08:00, 13:30, 19:00 dengan gram berbasis suhu tetap:
+  - 4C sampai <24C -> 30g
+  - 24C sampai <32C -> 40g
+  - 32C sampai 37C -> 50g
+  Sebelum dispense, sistem cek jarak pakan. Jika jarak <= 2.0 cm, event dibatalkan dan tampil peringatan "Pakan Habis" + buzzer.
+
+Catatan Mode D:
+- Simulasi ON: trigger manual tetap boleh kapan saja (tanpa menunggu jadwal), perhitungan gram memakai suhu simulasi.
+- Simulasi OFF: auto feed hanya lewat jadwal Mode D, tombol manual tetap berfungsi dan tetap memakai logika gram Mode D.
 
 ---
 
@@ -217,10 +226,16 @@ Lokasi: `Feederasea-R3Wifi-UNO/src/main.ino`
 - **Mode A (0)**: Pakan tetap 50g per event.
 - **Mode B (1)**: Pakan berdasarkan suhu (25-37C = 3% biomassa, di luar = 2%).
 - **Mode C (2)**: Sama dengan Mode B, tetapi otomatis pada 07:00 dan 17:00 (WITA).
+- **Mode D (3)**: Jadwal 08:00, 13:30, 19:00 dengan fixed gram by suhu:
+  - 4C sampai <24C = 30g
+  - 24C sampai <32C = 40g
+  - 32C sampai 37C = 50g
+  Event dibatalkan jika jarak pakan <= 2.0 cm (buzzer + LCD "Pakan Habis").
 
 ### B) Interface Kontrol (Blynk Input)
 - **V3 Manual_Feed**: Tombol manual untuk men-trigger pakan.
 - **V4 Mode_Select**: Pilih mode A/B/C (0/1/2).
+- **V4 Mode_Select**: Pilih mode A/B/C/D (0/1/2/3).
 - **V5 PWM_Percent**: Kecepatan motor (%).
 - **V6 GramPerSec_100**: Kalibrasi laju pakan pada PWM 100%.
 - **V2 Biomass**: Total biomassa ikan (gram), dipakai di Mode B/C.
@@ -240,6 +255,7 @@ Lokasi: `Feederasea-R3Wifi-UNO/src/main.ino`
 2. Atur biomassa (V2), mode (V4), dan kalibrasi (V6, V5).
 3. Untuk manual feed, tekan V3.
 4. Untuk mode jadwal, pilih Mode C dan biarkan sistem otomatis.
+   Untuk Mode D, sistem berjalan pada jadwal 08:00 / 13:30 / 19:00 dengan precheck jarak pakan.
 5. Pantau V20-V25 untuk status dan hasil event.
 
 ---

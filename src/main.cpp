@@ -27,6 +27,7 @@ static const uint8_t LCD_ADDR = 0x27;
 static const uint8_t BTN_MANUAL = 34; // input-only, needs external pull-up
 static const uint8_t LED_STATUS = 2;
 static const uint8_t LED_LOW_FEED = 15;
+static const uint8_t BUZZER = 13;
 }  // namespace Pins
 
 namespace Config {
@@ -49,6 +50,13 @@ static const uint32_t SERVO_STABILIZE_MS = 800;
 static const uint32_t SERVO_SETTLE_MS = 600;
 static const int SLOT_MORNING_H = 7;
 static const int SLOT_EVENING_H = 17;
+static const int SLOT_MODE_D_1_H = 8;
+static const int SLOT_MODE_D_1_M = 0;
+static const int SLOT_MODE_D_2_H = 13;
+static const int SLOT_MODE_D_2_M = 30;
+static const int SLOT_MODE_D_3_H = 19;
+static const int SLOT_MODE_D_3_M = 0;
+static const float MODE_D_EMPTY_DIST_CM = 2.0f;
 }  // namespace Config
 
 namespace VPin {
@@ -78,6 +86,7 @@ static const uint8_t LAST_EVENT = V25;
 #define VPIN_GPS_100 V6
 #define VPIN_SIM_EVENT V7
 #define VPIN_TEST_IN V8
+#define MODE_D 3
 
 // Globals
 OneWire oneWire(Pins::DS18B20);
@@ -136,6 +145,12 @@ bool btnLatched = false;
 
 int lastSlotDayMorning = -1;
 int lastSlotDayEvening = -1;
+int modeDLastResetDay = -1;
+int modeDLastTriggerDay = -1;
+int modeDLastTriggerMinuteOfDay = -1;
+bool modeDTriggered0800 = false;
+bool modeDTriggered1330 = false;
+bool modeDTriggered1900 = false;
 
 static float clampf(float v, float lo, float hi) {
   if (v < lo) return lo;
@@ -229,6 +244,7 @@ static float estimateFeedMassG(float distanceCm) {
 static String modeToChar(int mode) {
   if (mode == 0) return "A";
   if (mode == 1) return "B";
+  if (mode == MODE_D) return "D:SMART";
   return "C";
 }
 
@@ -249,6 +265,12 @@ static bool isScheduleSlotNow(int hour) {
   return (timeinfo.tm_hour == hour && timeinfo.tm_min == 0);
 }
 
+static bool isScheduleSlotNowHM(int hour, int minute) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return false;
+  return (timeinfo.tm_hour == hour && timeinfo.tm_min == minute);
+}
+
 static String makeEventLabel(const String &base) {
   return base;
 }
@@ -257,13 +279,19 @@ static int computeCommandedGrams(float tempC) {
   if (inputs.modeSelect == 0) {
     return 50;
   }
+  if (inputs.modeSelect == MODE_D) {
+    if (tempC >= 32.0f && tempC <= 37.0f) return 50;
+    if (tempC >= 24.0f && tempC < 32.0f) return 40;
+    if (tempC >= 4.0f && tempC < 24.0f) return 30;
+    return 30;
+  }
   float pct = (tempC >= 25.0f && tempC <= 37.0f) ? 0.03f : 0.02f;
   return (int)round(inputs.biomassG * pct);
 }
 
-static void startFeedEvent(const String &eventLabel) {
+static void startFeedEvent(const String &eventLabel, float tempForCommand) {
   lastEventLabel = eventLabel;
-  lastCmdGrams = computeCommandedGrams(lastTempC);
+  lastCmdGrams = computeCommandedGrams(tempForCommand);
   lastPwm = inputs.pwmPercent;
 
   double gps100 = (inputs.gramsPerSec100 < 1) ? 1.0 : inputs.gramsPerSec100;
@@ -277,6 +305,40 @@ static void startFeedEvent(const String &eventLabel) {
 
   feedState = PRECHECK;
   stateStartMs = millis();
+}
+
+static void buzzWarning() {
+  for (int i = 0; i < 2; i++) {
+    digitalWrite(Pins::BUZZER, HIGH);
+    delay(120);
+    digitalWrite(Pins::BUZZER, LOW);
+    delay(80);
+  }
+}
+
+static bool triggerDispenseEvent(const String &eventLabel, bool isManualTrigger) {
+  if (feedState != IDLE) return false;
+
+  float tempForCommand = inputs.simMode ? inputs.simTempC : lastTempCReal;
+  if (isnan(tempForCommand)) {
+    tempForCommand = lastTempC;
+  }
+
+  if (inputs.modeSelect == MODE_D) {
+    float distanceCm = inputs.simMode ? inputs.simDistanceCm : readUltrasonicCm();
+    if (distanceCm <= Config::MODE_D_EMPTY_DIST_CM) {
+      lastEventLabel = "PAKAN_HABIS";
+      buzzWarning();
+      lcdSetLines("D:SMART", "Pakan Habis");
+      Blynk.virtualWrite(VPin::LAST_EVENT, lastEventLabel);
+      return false;
+    }
+  }
+
+  // In simulation mode, manual trigger is allowed without schedule gating.
+  (void)isManualTrigger;
+  startFeedEvent(eventLabel, tempForCommand);
+  return true;
 }
 
 static void updateBlynkTelemetry() {
@@ -306,7 +368,9 @@ static void samplingTask() {
   }
 
   String realStr = isnan(lastTempCReal) ? "--" : String(lastTempCReal, 1);
-  String line1 = "M:" + modeToChar(inputs.modeSelect) + " R:" + realStr;
+  String line1 = (inputs.modeSelect == MODE_D)
+                     ? "D:SMART R:" + realStr
+                     : "M:" + modeToChar(inputs.modeSelect) + " R:" + realStr;
   String line2;
   if (feedState == IDLE) {
     line2 = "D:" + String(distanceCm, 1) + " F:" + String((int)lastFeedRemainingG);
@@ -359,6 +423,7 @@ static void handleButton() {
 }
 
 static void processSchedule() {
+  if (inputs.modeSelect == MODE_D) return;
   if (inputs.modeSelect != 2) return;
   if (!timeValid()) return;
 
@@ -367,11 +432,53 @@ static void processSchedule() {
 
   if (isScheduleSlotNow(Config::SLOT_MORNING_H) && lastSlotDayMorning != doy) {
     lastSlotDayMorning = doy;
-    startFeedEvent(makeEventLabel("SCHED_07"));
+    triggerDispenseEvent(makeEventLabel("SCHED_07"), false);
   }
   if (isScheduleSlotNow(Config::SLOT_EVENING_H) && lastSlotDayEvening != doy) {
     lastSlotDayEvening = doy;
-    startFeedEvent(makeEventLabel("SCHED_17"));
+    triggerDispenseEvent(makeEventLabel("SCHED_17"), false);
+  }
+}
+
+static void checkModeDSchedule() {
+  if (inputs.modeSelect != MODE_D) return;
+  if (inputs.simMode) return;
+  if (!timeValid()) return;
+
+  struct tm ti;
+  if (!getLocalTime(&ti)) return;
+
+  // Reset trigger flags once daily at 00:01.
+  if (ti.tm_hour == 0 && ti.tm_min == 1 && modeDLastResetDay != ti.tm_yday) {
+    modeDTriggered0800 = false;
+    modeDTriggered1330 = false;
+    modeDTriggered1900 = false;
+    modeDLastResetDay = ti.tm_yday;
+  }
+
+  int minuteOfDay = (ti.tm_hour * 60) + ti.tm_min;
+  if (modeDLastTriggerDay == ti.tm_yday && modeDLastTriggerMinuteOfDay == minuteOfDay) return;
+
+  bool shouldTrigger = false;
+  String label = "";
+  if (isScheduleSlotNowHM(Config::SLOT_MODE_D_1_H, Config::SLOT_MODE_D_1_M) && !modeDTriggered0800) {
+    shouldTrigger = true;
+    label = "SCHED_08";
+  } else if (isScheduleSlotNowHM(Config::SLOT_MODE_D_2_H, Config::SLOT_MODE_D_2_M) && !modeDTriggered1330) {
+    shouldTrigger = true;
+    label = "SCHED_1330";
+  } else if (isScheduleSlotNowHM(Config::SLOT_MODE_D_3_H, Config::SLOT_MODE_D_3_M) && !modeDTriggered1900) {
+    shouldTrigger = true;
+    label = "SCHED_19";
+  }
+  if (!shouldTrigger) return;
+
+  if (triggerDispenseEvent(makeEventLabel(label), false)) {
+    if (label == "SCHED_08") modeDTriggered0800 = true;
+    if (label == "SCHED_1330") modeDTriggered1330 = true;
+    if (label == "SCHED_19") modeDTriggered1900 = true;
+    modeDLastTriggerDay = ti.tm_yday;
+    modeDLastTriggerMinuteOfDay = minuteOfDay;
   }
 }
 
@@ -529,8 +636,10 @@ void setup() {
 
   pinMode(Pins::LED_STATUS, OUTPUT);
   pinMode(Pins::LED_LOW_FEED, OUTPUT);
+  pinMode(Pins::BUZZER, OUTPUT);
   digitalWrite(Pins::LED_STATUS, LOW);
   digitalWrite(Pins::LED_LOW_FEED, LOW);
+  digitalWrite(Pins::BUZZER, LOW);
 
   pinMode(Pins::BTN_MANUAL, INPUT);
 
@@ -575,19 +684,18 @@ void loop() {
   handleButton();
   if (requests.manualFeed) {
     requests.manualFeed = false;
-    if (feedState == IDLE) {
-      startFeedEvent(makeEventLabel("MANUAL"));
+    if (triggerDispenseEvent(makeEventLabel("MANUAL"), true)) {
       Blynk.virtualWrite(VPin::MANUAL_FEED, 0);
     }
   }
   if (requests.simEvent) {
     requests.simEvent = false;
-    if (feedState == IDLE) {
-      startFeedEvent(makeEventLabel("SIM_EVT"));
+    if (triggerDispenseEvent(makeEventLabel("SIM_EVT"), true)) {
       Blynk.virtualWrite(VPin::SIM_EVENT, 0);
     }
   }
   processSchedule();
+  checkModeDSchedule();
   updateFeedState();
 
   digitalWrite(Pins::LED_STATUS, (WiFi.status() == WL_CONNECTED && Blynk.connected()) ? HIGH : LOW);
