@@ -6,6 +6,7 @@
 #include <Servo.h>
 #include <VL53L1X.h>
 #include <Wire.h>
+#define MODE_D 3
 
 namespace Pins {
 static const uint8_t DS18B20 = 4;
@@ -45,6 +46,7 @@ static const float DIST_JITTER_CM = 0.12f;
 static const float EMPTY_ZERO_BAND_CM = 1.2f;
 static const uint16_t TOF_TIMING_BUDGET_US = 50000;
 static const uint16_t TOF_PERIOD_MS = 60;
+static const float MODE_D_EMPTY_DIST_CM = 2.0f;
 }  // namespace Config
 
 OneWire oneWire(Pins::DS18B20);
@@ -78,6 +80,9 @@ struct AppRequests {
   bool simEvent = false;
   bool schedMorning = false;
   bool schedEvening = false;
+  bool schedModeD0800 = false;
+  bool schedModeD1330 = false;
+  bool schedModeD1900 = false;
 };
 
 static AppInputs inputs;
@@ -221,12 +226,19 @@ static float estimateFeedMassG(float distanceCm) {
 static const char *modeToChar(int mode) {
   if (mode == 0) return "A";
   if (mode == 1) return "B";
+  if (mode == MODE_D) return "D:SMART";
   return "C";
 }
 
 static int computeCommandedGrams(float tempC) {
   if (inputs.modeSelect == 0) {
     return 50;
+  }
+  if (inputs.modeSelect == MODE_D) {
+    if (tempC >= 32.0f && tempC <= 37.0f) return 50;
+    if (tempC >= 24.0f && tempC < 32.0f) return 40;
+    if (tempC >= 4.0f && tempC < 24.0f) return 30;
+    return 30;
   }
   float pct = (tempC >= 25.0f && tempC <= 37.0f) ? 0.03f : 0.02f;
   return (int)round(inputs.biomassG * pct);
@@ -249,6 +261,27 @@ static void startFeedEvent(const char *eventLabel) {
 
   feedState = PRECHECK;
   stateStartMs = millis();
+}
+
+static bool triggerDispenseEvent(const char *eventLabel) {
+  if (feedState != IDLE) return false;
+
+  if (inputs.modeSelect == MODE_D) {
+    float distanceCm = inputs.simMode ? inputs.simDistanceCm : readDistanceCm();
+    if (isnan(distanceCm)) {
+      distanceCm = lastDistanceCm;
+    }
+    if (distanceCm <= Config::MODE_D_EMPTY_DIST_CM) {
+      strncpy(lastEventLabel, "PAKAN_HABIS", sizeof(lastEventLabel) - 1);
+      lastEventLabel[sizeof(lastEventLabel) - 1] = '\0';
+      digitalWrite(Pins::LED_LOW_FEED, HIGH);
+      lcdSetLines("D:SMART", "Pakan Habis");
+      return false;
+    }
+  }
+
+  startFeedEvent(eventLabel);
+  return true;
 }
 
 static void sendTelemetry() {
@@ -341,7 +374,9 @@ static void samplingTask() {
   }
 
   String realStr = isnan(lastTempCReal) ? "--" : String(lastTempCReal, 1);
-  String line1 = "M:" + String(modeToChar(inputs.modeSelect)) + " R:" + realStr;
+  String line1 = (inputs.modeSelect == MODE_D)
+                     ? "D:SMART R:" + realStr
+                     : "M:" + String(modeToChar(inputs.modeSelect)) + " R:" + realStr;
   String line2;
   if (feedState == IDLE) {
     line2 = "D:" + String(distanceCm, 1) + " F:" + String((int)lastFeedRemainingG);
@@ -471,6 +506,12 @@ static void handleSerialCommand(const char *line) {
       requests.schedMorning = true;
     } else if (strcmp(cmd, "SCHED_17") == 0) {
       requests.schedEvening = true;
+    } else if (strcmp(cmd, "SCHED_08") == 0) {
+      requests.schedModeD0800 = true;
+    } else if (strcmp(cmd, "SCHED_1330") == 0) {
+      requests.schedModeD1330 = true;
+    } else if (strcmp(cmd, "SCHED_19") == 0) {
+      requests.schedModeD1900 = true;
     }
   }
 }
@@ -541,19 +582,31 @@ void loop() {
   handleButton();
   if (requests.manualFeed && feedState == IDLE) {
     requests.manualFeed = false;
-    startFeedEvent("MANUAL");
+    triggerDispenseEvent("MANUAL");
   }
   if (requests.simEvent && feedState == IDLE) {
     requests.simEvent = false;
-    startFeedEvent("SIM_EVT");
+    triggerDispenseEvent("SIM_EVT");
   }
   if (requests.schedMorning && feedState == IDLE) {
     requests.schedMorning = false;
-    startFeedEvent("SCHED_07");
+    triggerDispenseEvent("SCHED_07");
   }
   if (requests.schedEvening && feedState == IDLE) {
     requests.schedEvening = false;
-    startFeedEvent("SCHED_17");
+    triggerDispenseEvent("SCHED_17");
+  }
+  if (requests.schedModeD0800 && feedState == IDLE) {
+    requests.schedModeD0800 = false;
+    triggerDispenseEvent("SCHED_08");
+  }
+  if (requests.schedModeD1330 && feedState == IDLE) {
+    requests.schedModeD1330 = false;
+    triggerDispenseEvent("SCHED_1330");
+  }
+  if (requests.schedModeD1900 && feedState == IDLE) {
+    requests.schedModeD1900 = false;
+    triggerDispenseEvent("SCHED_19");
   }
 
   updateFeedState();
